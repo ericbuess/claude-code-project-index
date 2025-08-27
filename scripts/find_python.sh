@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Python finder for PROJECT_INDEX
 # Finds the newest Python 3.8+ version available
 
