@@ -26,6 +26,7 @@ Just add `-i` to any Claude prompt:
 claude "fix the auth bug -i"          # Auto-creates/uses index (default 50k)
 claude "refactor database code -i75"  # Target ~75k tokens (if project needs it)
 claude "analyze architecture -ic200"  # Export up to 200k to clipboard for external AI
+claude "find similar functions -ie"   # Include neural embeddings (requires Ollama)
 
 # Or manually create/update the index anytime
 /index
@@ -92,7 +93,57 @@ claude "architecture review -ic800"      # Up to 800k tokens
 - ChatGPT
 - Grok
 
-**Note**: I'm not using this on large projects myself yet - this is inspiration/theory. Your mileage may vary. If you hit snags, have Claude Code update it to work for your specific use case!
+### Neural Embeddings with `-ie` flag
+```bash
+# Generate index with neural embeddings for each function/class
+claude "find similar code patterns -ie"  # Includes embeddings
+claude "search for duplicates -ie50"     # 50k tokens with embeddings
+```
+
+**Requirements**:
+- Ollama installed and running (`ollama serve`)
+- nomic-embed-text model (auto-downloads if needed)
+
+**Benefits**:
+- Semantic similarity search
+- Find duplicate/similar code patterns
+- Better code understanding through vector representations
+
+### Similarity Search (`similarity_index.py`)
+
+Find similar code patterns using neural embeddings with multiple algorithms:
+
+```bash
+# Build similarity cache (enhances PROJECT_INDEX.json)
+python3 ~/.claude-code-project-index/scripts/similarity_index.py --build-cache --algorithms cosine,euclidean
+
+# Search for similar functions
+python3 ~/.claude-code-project-index/scripts/similarity_index.py -q "authentication function"
+python3 ~/.claude-code-project-index/scripts/similarity_index.py -q "validate email" --algorithm euclidean
+
+# Find potential duplicates
+python3 ~/.claude-code-project-index/scripts/similarity_index.py --duplicates --algorithm cosine
+
+# Custom output file for experiments
+python3 ~/.claude-code-project-index/scripts/similarity_index.py --build-cache -o experiment.json --algorithms manhattan
+```
+
+**Available Algorithms:**
+- `cosine`: Standard cosine similarity (default)
+- `euclidean`: Based on Euclidean distance  
+- `manhattan`: Based on Manhattan distance (L1 norm)
+- `dot-product`: Raw dot product similarity
+- `jaccard`: Jaccard similarity for binary features
+- `weighted-cosine`: Weighted cosine (requires `--weights weights.json`)
+
+**Features:**
+- Integrated caching in PROJECT_INDEX.json for fast queries
+- Multiple similarity algorithms for different use cases
+- Duplicate detection and similarity search
+- Custom output files with `-o` flag for experimentation
+- Real-time calculation with `--no-cache` for one-off queries
+
+**Note**: Requires embeddings to be generated first with `python3 scripts/project_index.py -e`
 
 ## Token Sizing
 

@@ -23,6 +23,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Import centralized Ollama management
+try:
+    from find_ollama import OllamaManager
+except ImportError:
+    # Fallback if find_ollama.py is not in the same directory
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from find_ollama import OllamaManager
+
 # Import shared utilities
 from index_utils import (
     IGNORE_DIRS, PARSEABLE_LANGUAGES, CODE_EXTENSIONS, MARKDOWN_EXTENSIONS,
@@ -35,6 +44,31 @@ from index_utils import (
 MAX_FILES = 10000
 MAX_INDEX_SIZE = 1024 * 1024  # 1MB
 MAX_TREE_DEPTH = 5
+
+
+def generate_embedding(text: str, model_name: str = None, endpoint: str = None) -> Optional[List[float]]:
+    """Generate embedding for text using centralized Ollama management.
+    Returns None if embeddings are disabled or on error.
+    """
+    # Check if embeddings are enabled via environment
+    if not os.getenv('INCLUDE_EMBEDDINGS'):
+        return None
+    
+    model_name = model_name or os.getenv('EMBED_MODEL_NAME', 'nomic-embed-text')
+    endpoint = endpoint or os.getenv('EMBED_ENDPOINT', 'http://localhost:11434')
+    
+    try:
+        manager = OllamaManager(endpoint)
+        manager.default_model = model_name
+        success, embedding, error = manager.generate_embedding(text, model_name)
+        if success:
+            return embedding
+        else:
+            print(f"  Warning: Could not generate embedding: {error}", file=sys.stderr)
+            return None
+    except Exception as e:
+        print(f"  Warning: Could not generate embedding: {e}", file=sys.stderr)
+        return None
 
 
 def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) -> List[str]:
@@ -109,6 +143,8 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
 def build_index(root_dir: str) -> Tuple[Dict, int]:
     """Build the enhanced index with architectural awareness."""
     root = Path(root_dir)
+    include_embeddings = bool(os.getenv('INCLUDE_EMBEDDINGS'))
+    
     index = {
         'indexed_at': datetime.now().isoformat(),
         'root': str(root),
@@ -124,14 +160,19 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
             'total_directories': 0,
             'fully_parsed': {},
             'listed_only': {},
-            'markdown_files': 0
+            'markdown_files': 0,
+            'embeddings_generated': 0 if include_embeddings else None
         },
         'files': {},
         'dependency_graph': {}
     }
     
     # Generate directory tree
-    print("📊 Building directory tree...")
+    quiet = os.getenv('QUIET_MODE')
+    verbose = os.getenv('VERBOSE_MODE')
+    
+    if not quiet:
+        print("📊 Building directory tree...")
     index['project_structure']['tree'] = generate_tree_structure(root)
     
     file_count = 0
@@ -140,13 +181,15 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     directory_files = {}  # Track files per directory
     
     # Try to use git ls-files for better performance and accuracy
-    print("🔍 Indexing files...")
+    if not quiet:
+        print("🔍 Indexing files...")
     from index_utils import get_git_files
     git_files = get_git_files(root)
     
     if git_files is not None:
         # Use git-based file discovery
-        print(f"   Using git ls-files (found {len(git_files)} files)")
+        if verbose:
+            print(f"   Using git ls-files (found {len(git_files)} files)")
         files_to_process = git_files
         
         # Count directories from git files
@@ -160,7 +203,8 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         dir_count = len(seen_dirs)
     else:
         # Fallback to manual file discovery
-        print("   Using manual file discovery (git not available)")
+        if verbose:
+            print("   Using manual file discovery (git not available)")
         files_to_process = []
         for file_path in root.rglob('*'):
             if file_path.is_dir():
@@ -235,6 +279,56 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
                     file_info.update(extracted)
                     file_info['parsed'] = True
                     
+                    # Generate embeddings if enabled
+                    if include_embeddings:
+                        # Generate embeddings for functions
+                        for func_name, func_data in extracted.get('functions', {}).items():
+                            if isinstance(func_data, dict):
+                                # Create text representation for embedding
+                                func_text = f"Function: {func_name}\n"
+                                if 'signature' in func_data:
+                                    func_text += f"Signature: {func_data['signature']}\n"
+                                if 'doc' in func_data:
+                                    func_text += f"Documentation: {func_data['doc']}\n"
+                                if 'calls' in func_data:
+                                    func_text += f"Calls: {', '.join(func_data['calls'])}\n"
+                                
+                                embedding = generate_embedding(func_text)
+                                if embedding:
+                                    func_data['embedding'] = embedding
+                                    index['stats']['embeddings_generated'] += 1
+                        
+                        # Generate embeddings for classes and methods
+                        for class_name, class_data in extracted.get('classes', {}).items():
+                            if isinstance(class_data, dict):
+                                # Class-level embedding
+                                class_text = f"Class: {class_name}\n"
+                                if 'inherits' in class_data:
+                                    class_text += f"Inherits: {', '.join(class_data['inherits'])}\n"
+                                if 'doc' in class_data:
+                                    class_text += f"Documentation: {class_data['doc']}\n"
+                                
+                                class_embedding = generate_embedding(class_text)
+                                if class_embedding:
+                                    class_data['embedding'] = class_embedding
+                                    index['stats']['embeddings_generated'] += 1
+                                
+                                # Method embeddings
+                                for method_name, method_data in class_data.get('methods', {}).items():
+                                    if isinstance(method_data, dict):
+                                        method_text = f"Method: {class_name}.{method_name}\n"
+                                        if 'signature' in method_data:
+                                            method_text += f"Signature: {method_data['signature']}\n"
+                                        if 'doc' in method_data:
+                                            method_text += f"Documentation: {method_data['doc']}\n"
+                                        if 'calls' in method_data:
+                                            method_text += f"Calls: {', '.join(method_data['calls'])}\n"
+                                        
+                                        method_embedding = generate_embedding(method_text)
+                                        if method_embedding:
+                                            method_data['embedding'] = method_embedding
+                                            index['stats']['embeddings_generated'] += 1
+                    
                 # Update stats
                 lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
                 index['stats']['fully_parsed'][lang_key] = \
@@ -254,11 +348,12 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         file_count += 1
         
         # Progress indicator every 100 files
-        if file_count % 100 == 0:
+        if file_count % 100 == 0 and verbose:
             print(f"  Indexed {file_count} files...")
     
     # Infer directory purposes
-    print("🏗️  Analyzing directory purposes...")
+    if not quiet:
+        print("🏗️  Analyzing directory purposes...")
     for dir_path, files in directory_files.items():
         if files:  # Only process directories with files
             purpose = infer_directory_purpose(dir_path, files)
@@ -271,7 +366,8 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     index['stats']['total_directories'] = dir_count
     
     # Build dependency graph
-    print("🔗 Building dependency graph...")
+    if not quiet:
+        print("🔗 Building dependency graph...")
     dependency_graph = {}
     
     for file_path, file_info in index['files'].items():
@@ -318,7 +414,8 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         index['dependency_graph'] = dependency_graph
     
     # Build bidirectional call graph
-    print("📞 Building call graph...")
+    if not quiet:
+        print("📞 Building call graph...")
     call_graph = {}
     called_by_graph = {}
     
@@ -677,6 +774,10 @@ def print_summary(index: Dict, skipped_count: int):
     print(f"   📄 {stats['total_files']} code files found")
     print(f"   📝 {stats['markdown_files']} documentation files analyzed")
     
+    # Show embedding stats if enabled
+    if stats.get('embeddings_generated') is not None:
+        print(f"   🧠 {stats['embeddings_generated']} embeddings generated")
+    
     # Show fully parsed languages
     if stats['fully_parsed']:
         print("\n✅ Languages with full parsing:")
@@ -707,7 +808,9 @@ def print_summary(index: Dict, skipped_count: int):
 
 def main():
     """Run the enhanced indexer."""
-    print("🚀 Building Project Index...")
+    quiet = os.getenv('QUIET_MODE')
+    if not quiet:
+        print("🚀 Building Project Index...")
     
     # Check for target size from environment
     target_size_k = int(os.getenv('INDEX_TARGET_SIZE_K', '0'))
@@ -763,7 +866,98 @@ def main():
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == '--version':
-        print(f"PROJECT_INDEX v{__version__}")
-        sys.exit(0)
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='Generate PROJECT_INDEX.json for code analysis',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                     # Generate standard index
+  %(prog)s -e                  # Include neural embeddings
+  %(prog)s -s 75               # Target 75k tokens
+  %(prog)s -e -s 100           # 100k tokens with embeddings
+  %(prog)s --embed-model mxbai-embed-large  # Use different model
+  
+Requirements for embeddings:
+  - Ollama running (ollama serve)
+  - Model available (auto-downloads if needed)
+        '''
+    )
+    
+    parser.add_argument(
+        '--version', 
+        action='version', 
+        version=f'PROJECT_INDEX v{__version__}'
+    )
+    
+    parser.add_argument(
+        '-e', '--embeddings',
+        action='store_true',
+        help='Include neural embeddings for functions/classes (requires Ollama)'
+    )
+    
+    parser.add_argument(
+        '-s', '--size',
+        type=int,
+        metavar='K',
+        help='Target size in thousands of tokens (e.g., 75 for 75k)'
+    )
+    
+    parser.add_argument(
+        '--embed-model',
+        default='nomic-embed-text',
+        help='Ollama model to use for embeddings (default: nomic-embed-text)'
+    )
+    
+    parser.add_argument(
+        '--embed-endpoint',
+        default='http://localhost:11434',
+        help='Ollama API endpoint (default: http://localhost:11434)'
+    )
+    
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Minimal output'
+    )
+    
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Verbose output'
+    )
+    
+    parser.add_argument(
+        '-d', '--directory',
+        default='.',
+        help='Directory to index (default: current directory)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Set environment variables based on arguments
+    if args.embeddings:
+        os.environ['INCLUDE_EMBEDDINGS'] = '1'
+        os.environ['EMBED_MODEL_NAME'] = args.embed_model
+        os.environ['EMBED_ENDPOINT'] = args.embed_endpoint
+    
+    if args.size:
+        os.environ['INDEX_TARGET_SIZE_K'] = str(args.size)
+    
+    if args.quiet:
+        os.environ['QUIET_MODE'] = '1'
+    
+    if args.verbose:
+        os.environ['VERBOSE_MODE'] = '1'
+    
+    # Change to target directory if specified
+    if args.directory != '.':
+        original_dir = os.getcwd()
+        os.chdir(args.directory)
+        try:
+            main()
+        finally:
+            os.chdir(original_dir)
+    else:
+        main()

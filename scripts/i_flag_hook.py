@@ -14,11 +14,30 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+# Import centralized Ollama management
+try:
+    from find_ollama import OllamaManager
+except ImportError:
+    # Fallback if find_ollama.py is not in the same directory
+    sys.path.insert(0, str(Path(__file__).parent))
+    from find_ollama import OllamaManager
+
 # Constants
 DEFAULT_SIZE_K = 50  # Default 50k tokens
 MIN_SIZE_K = 1       # Minimum 1k tokens
 CLAUDE_MAX_K = 100   # Max 100k for Claude (leaves room for reasoning)
 EXTERNAL_MAX_K = 800 # Max 800k for external AI
+
+def ensure_ollama_for_embeddings():
+    """Check if Ollama is installed/running and nomic-embed-text model is available.
+    Returns: (success: bool, message: str)
+    """
+    try:
+        manager = OllamaManager()
+        success, message = manager.ensure_model_available()
+        return success, message
+    except Exception as e:
+        return False, f"Error checking Ollama: {str(e)}"
 
 def find_project_root():
     """Find project root by looking for .git or common project markers."""
@@ -64,20 +83,24 @@ def get_last_interactive_size():
     return DEFAULT_SIZE_K
 
 def parse_index_flag(prompt):
-    """Parse -i or -ic flag with optional size."""
-    # Pattern matches -i[number] or -ic[number]
-    match = re.search(r'-i(c?)(\d+)?(?:\s|$)', prompt)
+    """Parse -i, -ic, or -ie flag with optional size.
+    Returns: (size_k, clipboard_mode, embedding_mode, cleaned_prompt)
+    """
+    # Pattern matches -i[number], -ic[number], or -ie[number]
+    match = re.search(r'-i([ce]?)(\d+)?(?:\s|$)', prompt)
     
     if not match:
-        return None, None, prompt
+        return None, None, None, prompt
     
-    clipboard_mode = match.group(1) == 'c'
+    mode_char = match.group(1)
+    clipboard_mode = mode_char == 'c'
+    embedding_mode = mode_char == 'e'
     
     # If no explicit size provided, check for remembered size
     if match.group(2):
         size_k = int(match.group(2))
     else:
-        # For -i without size, try to use last remembered size
+        # For plain -i or -ie without size, try to use last remembered size
         if not clipboard_mode:
             size_k = get_last_interactive_size()
         else:
@@ -97,9 +120,9 @@ def parse_index_flag(prompt):
         size_k = EXTERNAL_MAX_K
     
     # Clean prompt (remove flag)
-    cleaned_prompt = re.sub(r'-ic?\d*\s*', '', prompt).strip()
+    cleaned_prompt = re.sub(r'-i[ce]?\d*\s*', '', prompt).strip()
     
-    return size_k, clipboard_mode, cleaned_prompt
+    return size_k, clipboard_mode, embedding_mode, cleaned_prompt
 
 def calculate_files_hash(project_root):
     """Calculate hash of non-ignored files to detect changes."""
@@ -138,8 +161,10 @@ def calculate_files_hash(project_root):
         print(f"Warning: Could not calculate files hash: {e}", file=sys.stderr)
         return "unknown"
 
-def should_regenerate_index(project_root, index_path, requested_size_k):
-    """Determine if index needs regeneration."""
+def should_regenerate_index(project_root, index_path, requested_size_k, require_embeddings=False):
+    """Determine if index needs regeneration.
+    If require_embeddings is True, force regeneration when embeddings are missing.
+    """
     if not index_path.exists():
         return True, "No index exists"
     
@@ -152,6 +177,11 @@ def should_regenerate_index(project_root, index_path, requested_size_k):
         # Get last generation info
         last_target = meta.get('target_size_k', 0)
         last_files_hash = meta.get('files_hash', '')
+        includes_embeddings = meta.get('includes_embeddings', False)
+        
+        # If embeddings are required but not present, regenerate
+        if require_embeddings and not includes_embeddings:
+            return True, "Embeddings missing in existing index"
         
         # Check if files changed
         current_files_hash = calculate_files_hash(project_root)
@@ -170,9 +200,12 @@ def should_regenerate_index(project_root, index_path, requested_size_k):
         print(f"Warning: Could not read index metadata: {e}", file=sys.stderr)
         return True, "Could not read index metadata"
 
-def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False):
-    """Generate index at specific token size."""
-    print(f"🎯 Generating {target_size_k}k token index...", file=sys.stderr)
+def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False, include_embeddings=False):
+    """Generate index at specific token size.
+    If include_embeddings is True, the indexer will attempt to include neural embeddings.
+    """
+    mode_note = " with embeddings" if include_embeddings else ""
+    print(f"🎯 Generating {target_size_k}k token index{mode_note}...", file=sys.stderr)
     
     # Find indexer script
     local_indexer = Path(__file__).parent / 'project_index.py'
@@ -192,16 +225,21 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
         else:
             python_cmd = sys.executable
         
-        # Pass target size as environment variable
+        # Pass target size and embedding settings as environment variables
         env = os.environ.copy()
         env['INDEX_TARGET_SIZE_K'] = str(target_size_k)
+        if include_embeddings:
+            env['INCLUDE_EMBEDDINGS'] = '1'
+            # Allow overrides via env, but provide sensible defaults
+            env.setdefault('EMBED_MODEL_NAME', 'nomic-embed-text')
+            env.setdefault('EMBED_ENDPOINT', 'http://localhost:11434')
         
         result = subprocess.run(
             [python_cmd, str(indexer_path)],
             cwd=str(project_root),
             capture_output=True,
             text=True,
-            timeout=30,  # 30 seconds should be plenty for most projects
+            timeout=(180 if include_embeddings else 30),  # allow more time when generating embeddings
             env=env
         )
         
@@ -226,7 +264,8 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
                     'target_size_k': target_size_k,
                     'actual_size_k': actual_size_k,
                     'files_hash': calculate_files_hash(project_root),
-                    'compression_ratio': f"{(actual_size_k/target_size_k)*100:.1f}%" if target_size_k > 0 else "N/A"
+                    'compression_ratio': f"{(actual_size_k/target_size_k)*100:.1f}%" if target_size_k > 0 else "N/A",
+                    'includes_embeddings': bool(include_embeddings),
                 }
                 
                 # Remember -i size for next time (but not -ic)
@@ -240,7 +279,7 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
                 with open(index_path, 'w') as f:
                     json.dump(index, f, indent=2)
                 
-                print(f"✅ Created PROJECT_INDEX.json ({actual_size_k}k actual, {target_size_k}k target)", file=sys.stderr)
+                print(f"✅ Created PROJECT_INDEX.json ({actual_size_k}k actual, {target_size_k}k target){' with embeddings' if include_embeddings else ''}", file=sys.stderr)
                 return True
             else:
                 print("⚠️ Index file not created", file=sys.stderr)
@@ -564,14 +603,14 @@ Focus on providing actionable file locations and insights."""
         return ('error', str(e))
 
 def main():
-    """Process UserPromptSubmit hook for -i and -ic flag detection."""
+    """Process UserPromptSubmit hook for -i, -ic, and -ie flag detection."""
     try:
         # Read hook input
         input_data = json.load(sys.stdin)
         prompt = input_data.get('prompt', '')
         
         # Parse flag
-        size_k, clipboard_mode, cleaned_prompt = parse_index_flag(prompt)
+        size_k, clipboard_mode, embedding_mode, cleaned_prompt = parse_index_flag(prompt)
         
         if size_k is None:
             # No index flag, let prompt proceed normally
@@ -581,12 +620,22 @@ def main():
         project_root = find_project_root()
         index_path = project_root / 'PROJECT_INDEX.json'
         
+        # If embedding mode requested, check Ollama runtime
+        include_embeddings = False
+        if embedding_mode:
+            ok, msg = ensure_ollama_for_embeddings()
+            if ok:
+                include_embeddings = True
+                print(f"🧠 Embedding mode: {msg}", file=sys.stderr)
+            else:
+                print(f"⚠️ Embeddings disabled: {msg}", file=sys.stderr)
+        
         # Check if regeneration needed
-        should_regen, reason = should_regenerate_index(project_root, index_path, size_k)
+        should_regen, reason = should_regenerate_index(project_root, index_path, size_k, require_embeddings=include_embeddings)
         
         if should_regen:
             print(f"🔄 Regenerating index: {reason}", file=sys.stderr)
-            if not generate_index_at_size(project_root, size_k, clipboard_mode):
+            if not generate_index_at_size(project_root, size_k, clipboard_mode, include_embeddings=include_embeddings):
                 print("⚠️ Proceeding without PROJECT_INDEX.json", file=sys.stderr)
                 sys.exit(0)
         else:
