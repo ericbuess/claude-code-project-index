@@ -103,12 +103,10 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
     return tree_lines
 
 
-# These functions are now imported from index_utils
-
-
 def build_index(root_dir: str) -> Tuple[Dict, int]:
     """Build the enhanced index with architectural awareness."""
     root = Path(root_dir)
+    
     index = {
         'indexed_at': datetime.now().isoformat(),
         'root': str(root),
@@ -131,7 +129,11 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     }
     
     # Generate directory tree
-    print("📊 Building directory tree...")
+    quiet = os.getenv('QUIET_MODE')
+    verbose = os.getenv('VERBOSE_MODE')
+    
+    if not quiet:
+        print("📊 Building directory tree...")
     index['project_structure']['tree'] = generate_tree_structure(root)
     
     file_count = 0
@@ -140,13 +142,15 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     directory_files = {}  # Track files per directory
     
     # Try to use git ls-files for better performance and accuracy
-    print("🔍 Indexing files...")
+    if not quiet:
+        print("🔍 Indexing files...")
     from index_utils import get_git_files
     git_files = get_git_files(root)
     
     if git_files is not None:
         # Use git-based file discovery
-        print(f"   Using git ls-files (found {len(git_files)} files)")
+        if verbose:
+            print(f"   Using git ls-files (found {len(git_files)} files)")
         files_to_process = git_files
         
         # Count directories from git files
@@ -160,7 +164,8 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         dir_count = len(seen_dirs)
     else:
         # Fallback to manual file discovery
-        print("   Using manual file discovery (git not available)")
+        if verbose:
+            print("   Using manual file discovery (git not available)")
         files_to_process = []
         for file_path in root.rglob('*'):
             if file_path.is_dir():
@@ -254,11 +259,12 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         file_count += 1
         
         # Progress indicator every 100 files
-        if file_count % 100 == 0:
+        if file_count % 100 == 0 and verbose:
             print(f"  Indexed {file_count} files...")
     
     # Infer directory purposes
-    print("🏗️  Analyzing directory purposes...")
+    if not quiet:
+        print("🏗️  Analyzing directory purposes...")
     for dir_path, files in directory_files.items():
         if files:  # Only process directories with files
             purpose = infer_directory_purpose(dir_path, files)
@@ -271,7 +277,8 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     index['stats']['total_directories'] = dir_count
     
     # Build dependency graph
-    print("🔗 Building dependency graph...")
+    if not quiet:
+        print("🔗 Building dependency graph...")
     dependency_graph = {}
     
     for file_path, file_info in index['files'].items():
@@ -318,7 +325,8 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         index['dependency_graph'] = dependency_graph
     
     # Build bidirectional call graph
-    print("📞 Building call graph...")
+    if not quiet:
+        print("📞 Building call graph...")
     call_graph = {}
     called_by_graph = {}
     
@@ -396,9 +404,6 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     index['staleness_check'] = week_old
     
     return index, skipped_count
-
-
-# infer_file_purpose is now imported from index_utils
 
 
 def convert_to_enhanced_dense_format(index: Dict) -> Dict:
@@ -707,7 +712,9 @@ def print_summary(index: Dict, skipped_count: int):
 
 def main():
     """Run the enhanced indexer."""
-    print("🚀 Building Project Index...")
+    quiet = os.getenv('QUIET_MODE')
+    if not quiet:
+        print("🚀 Building Project Index...")
     
     # Check for target size from environment
     target_size_k = int(os.getenv('INDEX_TARGET_SIZE_K', '0'))
@@ -763,7 +770,69 @@ def main():
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == '--version':
-        print(f"PROJECT_INDEX v{__version__}")
-        sys.exit(0)
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='Generate PROJECT_INDEX.json for code analysis',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                     # Generate standard index
+  %(prog)s -s 75               # Target 75k tokens
+  %(prog)s --quiet             # Minimal output
+        '''
+    )
+    
+    parser.add_argument(
+        '--version', 
+        action='version', 
+        version=f'PROJECT_INDEX v{__version__}'
+    )
+    
+    parser.add_argument(
+        '-s', '--size',
+        type=int,
+        metavar='K',
+        help='Target size in thousands of tokens (e.g., 75 for 75k)'
+    )
+    
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Minimal output'
+    )
+    
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Verbose output'
+    )
+    
+    parser.add_argument(
+        '-d', '--directory',
+        default='.',
+        help='Directory to index (default: current directory)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Set environment variables based on arguments
+    if args.size:
+        os.environ['INDEX_TARGET_SIZE_K'] = str(args.size)
+    
+    if args.quiet:
+        os.environ['QUIET_MODE'] = '1'
+    
+    if args.verbose:
+        os.environ['VERBOSE_MODE'] = '1'
+    
+    # Change to target directory if specified
+    if args.directory != '.':
+        original_dir = os.getcwd()
+        os.chdir(args.directory)
+        try:
+            main()
+        finally:
+            os.chdir(original_dir)
+    else:
+        main()

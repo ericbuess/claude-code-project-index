@@ -1,0 +1,23 @@
+# File was edited
+# Old:     "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/update_index.py"
+          }
+        ]
+      }
+    ],
+# New:     "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/reindex_if_needed.py"
+          }
+        ]
+      }
+    ],
