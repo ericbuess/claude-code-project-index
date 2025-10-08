@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Python runner that uses the saved Python command from installation
 
 INSTALL_DIR="$HOME/.claude-code-project-index"
