@@ -38,7 +38,7 @@ CODE_EXTENSIONS = {
     '.cs', '.sh', '.bash', '.sql', '.r', '.R', '.lua', '.m',
     '.ex', '.exs', '.jl', '.dart', '.vue', '.svelte',
     # Configuration and data files
-    '.json', '.html', '.css'
+    '.json', '.html', '.css', '.yml', '.yaml', '.Dockerfile
 }
 
 # Markdown files to analyze
